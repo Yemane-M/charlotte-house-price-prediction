@@ -30,6 +30,9 @@ data/processed/
 model/*.joblib
 model/*.pkl
 
+# Keep the production model required by the application
+!model/xgboost_production.joblib
+
 # OS files
 .DS_Store
 Thumbs.db
