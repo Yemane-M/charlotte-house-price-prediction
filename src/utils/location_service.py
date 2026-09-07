@@ -487,9 +487,18 @@ def geocode_address(
 ):
     """
     Convert a Charlotte street address into latitude
-    and longitude using the U.S. Census geocoder.
+    and longitude.
+
+    Primary geocoder:
+        U.S. Census
+
+    Fallback geocoder:
+        OpenStreetMap Nominatim
     """
 
+    # --------------------------------------------------------
+    # VALIDATE INPUT
+    # --------------------------------------------------------
     validated = validate_address(
         street=street,
         city=city,
@@ -504,6 +513,9 @@ def geocode_address(
         f"{validated['zipcode']}"
     )
 
+    # --------------------------------------------------------
+    # TRY U.S. CENSUS GEOCODER FIRST
+    # --------------------------------------------------------
     params = {
         "address": one_line_address,
         "benchmark": "Public_AR_Current",
@@ -511,8 +523,9 @@ def geocode_address(
         "format": "json",
     }
 
-    try:
+    matches = []
 
+    try:
         response = requests.get(
             CENSUS_GEOCODER_URL,
             params=params,
@@ -521,90 +534,127 @@ def geocode_address(
 
         response.raise_for_status()
 
-    except requests.RequestException as exc:
-
-        raise RuntimeError(
-            "The address lookup service is currently "
-            "unavailable. Please try again."
-        ) from exc
-
-
-    # --------------------------------------------------------
-    # READ RESPONSE
-    # --------------------------------------------------------
-
-    try:
-
         data = response.json()
-
-        matches = (
-            data[
-                "result"
-            ][
-                "addressMatches"
-            ]
-        )
+        matches = data["result"]["addressMatches"]
 
     except (
+        requests.RequestException,
         KeyError,
         TypeError,
         ValueError,
-    ) as exc:
+    ):
+        # Census failed or timed out.
+        # Continue so the fallback geocoder can be tried.
+        matches = []
 
-        raise RuntimeError(
-            "Unexpected response from the address "
-            "lookup service."
-        ) from exc
-
-
+    
     # --------------------------------------------------------
-    # NO MATCH
+    # CENSUS MATCH FOUND
     # --------------------------------------------------------
+    if matches:
+        match = matches[0]
 
-    if not matches:
-        raise ValueError(
-            "The address could not be found. "
-            "Check the street address and ZIP code "
-            "and try again."
+        coordinates = match["coordinates"]
+
+        latitude = float(
+            coordinates["y"]
         )
 
+        longitude = float(
+            coordinates["x"]
+        )
 
-    # --------------------------------------------------------
-    # FIRST / BEST MATCH
-    # --------------------------------------------------------
-
-    match = matches[0]
-
-    coordinates = (
-        match[
-            "coordinates"
-        ]
-    )
-
-    latitude = float(
-        coordinates[
-            "y"
-        ]
-    )
-
-    longitude = float(
-        coordinates[
-            "x"
-        ]
-    )
-
-    matched_address = (
-        match.get(
+        matched_address = match.get(
             "matchedAddress",
             one_line_address,
         )
-    )
 
+    # --------------------------------------------------------
+    # CENSUS FAILED - TRY OPENSTREETMAP
+    # --------------------------------------------------------
+    else:
+        nominatim_url = (
+            "https://nominatim.openstreetmap.org/search"
+        )
+
+        nominatim_params = {
+            "q": one_line_address,
+            "format": "jsonv2",
+            "limit": 1,
+            "countrycodes": "us",
+            "addressdetails": 1,
+        }
+
+        headers = {
+            "User-Agent": (
+                "charlotte-house-price-prediction/1.0"
+            )
+        }
+
+        try:
+            fallback_response = requests.get(
+                nominatim_url,
+                params=nominatim_params,
+                headers=headers,
+                timeout=10,
+            )
+
+            fallback_response.raise_for_status()
+
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                "The address lookup service is currently "
+                "unavailable. Please try again."
+            ) from exc
+
+        try:
+            fallback_matches = fallback_response.json()
+
+        except ValueError as exc:
+            raise RuntimeError(
+                "Unexpected response from the fallback "
+                "address lookup service."
+            ) from exc
+
+        # ----------------------------------------------------
+        # NO MATCH FROM EITHER SERVICE
+        # ----------------------------------------------------
+        if not fallback_matches:
+            raise ValueError(
+                "The address could not be found. "
+                "Check the street address and ZIP code "
+                "and try again."
+            )
+
+        fallback_match = fallback_matches[0]
+
+        try:
+            latitude = float(
+                fallback_match["lat"]
+            )
+
+            longitude = float(
+                fallback_match["lon"]
+            )
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise RuntimeError(
+                "Unexpected coordinates returned by "
+                "the fallback address lookup service."
+            ) from exc
+
+        matched_address = fallback_match.get(
+            "display_name",
+            one_line_address,
+        )
 
     # --------------------------------------------------------
     # GEOGRAPHIC SAFETY CHECK
     # --------------------------------------------------------
-
     if not (
         MIN_LATITUDE
         <= latitude
@@ -625,26 +675,16 @@ def geocode_address(
             "outside the supported Charlotte area."
         )
 
-
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
     return {
-        "input_address":
-            one_line_address,
-
-        "matched_address":
-            matched_address,
-
-        "latitude":
-            latitude,
-
-        "longitude":
-            longitude,
-
-        "zipcode":
-            validated[
-                "zipcode"
-            ],
+        "input_address": one_line_address,
+        "matched_address": matched_address,
+        "latitude": latitude,
+        "longitude": longitude,
+        "zipcode": validated["zipcode"],
     }
-
 
 # ============================================================
 # COMPLETE LOCATION RESOLUTION
